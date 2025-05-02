@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
 from PIL import Image
@@ -6,6 +7,7 @@ from io import BytesIO
 import google.generativeai as genai
 import os
 from dotenv import load_dotenv
+import json
 
 load_dotenv()
 
@@ -15,13 +17,21 @@ model = genai.GenerativeModel("gemini-1.5-flash")
 
 app = FastAPI()
 
+# Allow CORS for all origins (customize in production)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Replace with your React frontend URL in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Pydantic schemas
 class ImageRequest(BaseModel):
     image_url: str
 
-class AnalysisResponse(BaseModel):
-    description: str
-    nutrients: dict
+class SummaryResponse(BaseModel):
+    summary: str
 
 # Download image from URL
 def download_image(url: str) -> Image.Image:
@@ -33,16 +43,11 @@ def download_image(url: str) -> Image.Image:
         raise HTTPException(status_code=400, detail=f"Image download failed: {e}")
 
 # Analyze image using Gemini
-def analyze_image(image: Image.Image) -> AnalysisResponse:
+def analyze_image(image: Image.Image) -> SummaryResponse:
     prompt = (
-        "Analyze this food image. First, give a brief description.Just describe the food items you see in the image."
-        "An the description should be regarding the food item not what to you see in image not just the image description. "
-        "Give atleast 3 sentences for the description"
-        "Describe just the food you detect not the image."
-        "Then estimate basic nutritional values "
-        "Do not the image shows and all things just start to describe"
-
-        "(calories, protein, fat, and carbs). Respond in JSON like this:\n"
+        "Analyze this food image. First, give a brief description of the food items detected, not the image itself."
+        "The description should be at least 3 sentences. Then estimate the basic nutritional values "
+        "(calories, protein, fat, and carbs). Respond in JSON format like this:\n"
         "{\n"
         "  \"description\": \"...\",\n"
         "  \"nutrients\": {\n"
@@ -54,17 +59,25 @@ def analyze_image(image: Image.Image) -> AnalysisResponse:
         result = model.generate_content([prompt, image])
         text = result.text
         start, end = text.find('{'), text.rfind('}') + 1
-        import json
         parsed = json.loads(text[start:end])
-        return AnalysisResponse(
-            description=parsed.get("description", "No description"),
-            nutrients=parsed.get("nutrients", {})
+        
+        description = parsed.get("description", "No description")
+        nutrients = parsed.get("nutrients", {})
+        nutrient_summary = (
+            f"It contains around {nutrients.get('calories', 'N/A')} calories, "
+            f"{nutrients.get('protein', 'N/A')} protein, "
+            f"{nutrients.get('fat', 'N/A')} fat, and "
+            f"{nutrients.get('carbs', 'N/A')} carbohydrates."
         )
+        combined_summary = f"{description} {nutrient_summary}"
+
+        return SummaryResponse(summary=combined_summary)
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gemini analysis failed: {e}")
 
 # Endpoint
-@app.post("/analyze", response_model=AnalysisResponse)
+@app.post("/analyze", response_model=SummaryResponse)
 async def analyze(request: ImageRequest):
     image = download_image(request.image_url)
     return analyze_image(image)
